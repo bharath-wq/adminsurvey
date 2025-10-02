@@ -4,8 +4,10 @@
 import os, io, json, zipfile, importlib.util, re
 from typing import Dict
 import pandas as pd
-
+import ssl
 from content import run_flow
+
+ssl._create_default_https_context = ssl._create_unverified_context
 
 # ---- USER SETTINGS ----
 FLOW_PATH   = "AdmitDeclineCleanFlow.tfl"   # .tfl or .tflx (packaged)

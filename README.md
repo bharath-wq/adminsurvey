@@ -1,2 +1,0 @@
-# adminsurvey
-adminsurvey project

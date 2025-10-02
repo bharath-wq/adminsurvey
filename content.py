@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -20,11 +19,18 @@ Notes:
 """
 
 from __future__ import annotations
-import os, io, json, zipfile, re
+
+import io
+import json
+import os
+import re
+import zipfile
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional, Callable, Tuple
-import pandas as pd
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 import numpy as np
+import pandas as pd
+
 
 @dataclass
 class Node:
@@ -35,57 +41,71 @@ class Node:
     nextNodes: List[Tuple[str, str]]  # list of (nextNodeId, nextNamespace)
     config: Dict[str, Any]
 
+
 @dataclass
 class Flow:
     nodes: Dict[str, Node]
     initial: List[str]
     connections: Dict[str, Dict[str, Any]]
 
+
 # ----------------- Load .tfl/.tflx -----------------
 
+
 def load_flow(path: str) -> Dict[str, Any]:
-    with open(path, 'rb') as fh:
+    with open(path, "rb") as fh:
         head = fh.read(4)
-    if head == b'PK\x03\x04':
-        with zipfile.ZipFile(path,'r') as z:
+    if head == b"PK\x03\x04":
+        with zipfile.ZipFile(path, "r") as z:
             # Tableau Packaged Flow: main JSON is 'flow'
-            with z.open('flow','r') as f:
-                return json.load(io.TextIOWrapper(f, encoding='utf-8'))
+            with z.open("flow", "r") as f:
+                return json.load(io.TextIOWrapper(f, encoding="utf-8"))
     else:
         # raw JSON
-        with open(path,'r',encoding='utf-8') as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
+
 
 def _parse_next(nextNodes: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
     out = []
     for n in nextNodes or []:
-        nid = n.get('nextNodeId')
-        ns = n.get('nextNamespace') or n.get('namespace') or 'Default'
+        nid = n.get("nextNodeId")
+        ns = n.get("nextNamespace") or n.get("namespace") or "Default"
         if nid:
             out.append((nid, ns))
     return out
 
+
 def parse(flow_json: Dict[str, Any]) -> Flow:
-    nodes_raw = flow_json.get('nodes', {})
+    nodes_raw = flow_json.get("nodes", {})
     nodes: Dict[str, Node] = {}
     for nid, obj in nodes_raw.items():
         nodes[nid] = Node(
-            id=obj.get('id') or nid,
-            name=obj.get('name') or nid,
-            nodeType=obj.get('nodeType') or obj.get('type') or 'Unknown',
-            baseType=obj.get('baseType') or 'transform',
-            nextNodes=_parse_next(obj.get('nextNodes', [])),
+            id=obj.get("id") or nid,
+            name=obj.get("name") or nid,
+            nodeType=obj.get("nodeType") or obj.get("type") or "Unknown",
+            baseType=obj.get("baseType") or "transform",
+            nextNodes=_parse_next(obj.get("nextNodes", [])),
             config=obj,
         )
-    initial = list(flow_json.get('initialNodes') or [])
-    connections = flow_json.get('connections') or {}
+    initial = list(flow_json.get("initialNodes") or [])
+    connections = flow_json.get("connections") or {}
     return Flow(nodes=nodes, initial=initial, connections=connections)
+
 
 # ----------------- Execution -----------------
 
+
 class Context:
-    def __init__(self, flow_path: str, outdir: str, filename_map: Optional[Dict[str,str]]=None,
-                 extensibility_hook: Optional[Callable[[pd.DataFrame, Dict[str,Any]], pd.DataFrame]]=None):
+    def __init__(
+        self,
+        flow_path: str,
+        outdir: str,
+        filename_map: Optional[Dict[str, str]] = None,
+        extensibility_hook: Optional[
+            Callable[[pd.DataFrame, Dict[str, Any]], pd.DataFrame]
+        ] = None,
+    ):
         self.flow_path = os.path.abspath(flow_path)
         self.flow_dir = os.path.dirname(self.flow_path)
         self.outdir = os.path.abspath(outdir)
@@ -95,6 +115,7 @@ class Context:
         self.cache: Dict[str, pd.DataFrame] = {}
         self.warnings: List[str] = []
 
+
 def _excel_sheet_from_table(table_str: str) -> Optional[str]:
     # pattern like "['SheetName$']"
     if not table_str:
@@ -103,111 +124,171 @@ def _excel_sheet_from_table(table_str: str) -> Optional[str]:
     if m:
         val = m.group(1)
         # strip trailing $ if present
-        if val.endswith('$'):
+        if val.endswith("$"):
             val = val[:-1]
         return val
     return None
 
+
 def _exec_LoadExcel(node: Node, flow: Flow, ctx: Context) -> pd.DataFrame:
-    conn_id = node.config.get('connectionId')
+    conn_id = node.config.get("connectionId")
     conn = flow.connections.get(conn_id) or {}
-    attrs = (conn.get('connectionAttributes') or {})
-    filename = attrs.get('filename')
+    attrs = conn.get("connectionAttributes") or {}
+    filename = attrs.get("filename")
     # allow mapping to local path
     filename = ctx.filename_map.get(filename, filename)
     if not filename:
-        raise FileNotFoundError(f"Input '{node.name}' has no filename in connection {conn_id}")
+        raise FileNotFoundError(
+            f"Input '{node.name}' has no filename in connection {conn_id}"
+        )
     if not os.path.isabs(filename):
         filename = os.path.join(ctx.flow_dir, filename)
     if not os.path.exists(filename):
         raise FileNotFoundError(f"Excel not found for '{node.name}': {filename}")
     # sheet
-    table = (node.config.get('relation') or {}).get('table')
+    table = (node.config.get("relation") or {}).get("table")
     sheet = _excel_sheet_from_table(table) or 0
     df = pd.read_excel(filename, sheet_name=sheet)
     return df
 
+
 def _exec_Remap(df: pd.DataFrame, node: Node) -> pd.DataFrame:
     d = df.copy()
-    col = node.config.get('columnName')
-    val_map = (node.config.get('values') or {}).get('null') or []
+    col = node.config.get("columnName")
+    val_map = (node.config.get("values") or {}).get("null") or []
     if col and col in d.columns and val_map:
         # normalize entries like '""' or 'null' or specific strings -> NaN
-        targets = [v.strip('"').strip("'") if isinstance(v, str) else v for v in val_map]
+        targets = [
+            v.strip('"').strip("'") if isinstance(v, str) else v for v in val_map
+        ]
         d[col] = d[col].replace(targets, np.nan)
     return d
 
+
 def _exec_ChangeType(df: pd.DataFrame, node: Node) -> pd.DataFrame:
     d = df.copy()
-    col = node.config.get('columnName')
-    to = (node.config.get('dataType') or '').lower()
+    col = node.config.get("columnName")
+    to = (node.config.get("dataType") or "").lower()
     if col in d.columns:
-        if to in ('string','text'):
-            d[col] = d[col].astype('string')
-        elif to in ('integer','int'):
-            d[col] = pd.to_numeric(d[col], errors='coerce').astype('Int64')
-        elif to in ('float','double','number','real','decimal'):
-            d[col] = pd.to_numeric(d[col], errors='coerce')
-        elif to in ('date','datetime','timestamp'):
-            d[col] = pd.to_datetime(d[col], errors='coerce')
-        elif to in ('boolean','bool'):
-            d[col] = d[col].astype('boolean')
+        if to in ("string", "text"):
+            d[col] = d[col].astype("string")
+        elif to in ("integer", "int"):
+            d[col] = pd.to_numeric(d[col], errors="coerce").astype("Int64")
+        elif to in ("float", "double", "number", "real", "decimal"):
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+        elif to in ("date", "datetime", "timestamp"):
+            d[col] = pd.to_datetime(d[col], errors="coerce")
+        elif to in ("boolean", "bool"):
+            d[col] = d[col].astype("boolean")
     return d
 
-def _exec_SuperExtensibilityNode(df: pd.DataFrame, node: Node, ctx: Context) -> pd.DataFrame:
+
+def _exec_SuperExtensibilityNode(
+    df: pd.DataFrame, node: Node, ctx: Context
+) -> pd.DataFrame:
     # Try to call provided hook; if missing, pass-through
-    setup = ((node.config.get('actionNode') or {}).get('setupParameters') or {})
-    execp = ((node.config.get('actionNode') or {}).get('executionParameters') or {})
-    info = {'setup': setup, 'exec': execp, 'name': node.name}
+    setup = (node.config.get("actionNode") or {}).get("setupParameters") or {}
+    execp = (node.config.get("actionNode") or {}).get("executionParameters") or {}
+    info = {"setup": setup, "exec": execp, "name": node.name}
     if ctx.extensibility_hook:
         try:
             return ctx.extensibility_hook(df.copy(), info)
         except Exception as e:
-            ctx.warnings.append(f"Extensibility step '{node.name}' failed: {e}; passing through.")
+            ctx.warnings.append(
+                f"Extensibility step '{node.name}' failed: {e}; passing through."
+            )
             return df
     # No hook supplied: just pass-through
     ctx.warnings.append(f"Skipping external script '{node.name}' (no hook supplied).")
     return df
 
+
 def _exec_WriteToHyper(df: pd.DataFrame, node: Node, ctx: Context) -> pd.DataFrame:
     # Write CSV instead of Hyper
-    fname = re.sub(r'[^A-Za-z0-9._-]+', '_', node.name) + '.csv'
+    fname = re.sub(r"[^A-Za-z0-9._-]+", "_", node.name) + ".csv"
     path = os.path.join(ctx.outdir, fname)
     df.to_csv(path, index=False)
     print(f"[Output] {node.name} -> {path}")
     return df
 
+
 def _exec_SuperUnion(dfs: List[pd.DataFrame]) -> pd.DataFrame:
     frames = [d.copy() for d in dfs if isinstance(d, pd.DataFrame)]
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True, sort=False)
 
-def _exec_Container(start_node_id: str, container: Dict[str, Any], ctx: Context) -> pd.DataFrame:
+    # Standardize column names across different survey years
+    # Map new column names to old/standard names for consistency
+    column_mapping = {
+        # Daniels School -> Krannert School (standardize on Krannert)
+        "Please share any additional comments/rationale on your decision to withdraw admittance from Purdue University's Mitch Daniels School of Business.": "Please share any additional comments/rationale on your decision to withdraw admittance from Purdue University's Krannert School",
+        # Graduate Business Program -> MBA/MS Program
+        "What were the deciding factors you used when choosing your future Graduate Business Program? (Please Select all that Apply): - Selected Choice": "What were the deciding factors upon choosing your future MBA/MS Program? (Please Select all that Apply): -",
+        "What were the deciding factors you used when choosing your future Graduate Business Program? (Please Select all that Apply): - Other - Text": "What were the deciding factors upon choosing your future MBA/MS Program? (Please Select all that Apply): - Other - Text",
+        # Daniels School program names -> Krannert
+        "Program at the Daniels School of Business to which you applied (select all that apply): - Selected Choice": "Program at Krannert to which you applied: -  Selected Choice",
+        "Program at the Daniels School of Business to which you applied (select all that apply): - Other - Text": "Program at Krannert to which you applied: - Other - Text",
+        # MBA/MS/Online variations
+        "Did you decide to choose an MBA/MS or other Graduate Program at a different school?": "Did you decide to choose an MBA/MS/Online or other Graduate Program at a different school?",
+        # School/Program names
+        "Name of the school that you have chosen to enroll with:": "Name of the school that you will be attending:",
+        # Program type descriptions
+        'Please select the response that best describes the type of program you enrolled in. Or you can identify the specific program by selecting "Other" and entering the program in: - Selected Choice': "Please select the response that best describes the type of program you enrolled in. Or you can identify the specific program  1",
+        'Please select the response that best describes the type of program you enrolled in. Or you can identify the specific program by selecting "Other" and entering the program in: - Other (Please specify) - Text': "Please select the response that best describes the type of program you enrolled in. Or you can identify the specific program  1 - Other - Text",
+        # Other schools
+        "To which other schools did you apply? Please do NOT use acronyms. (If applicable)": "To which other schools did you apply? (If applicable)",
+        # Gender field
+        "How do you describe yourself? - Selected Choice": "Gender",
+    }
+
+    standardized_frames = []
+    for df in frames:
+        df_copy = df.copy()
+
+        # Rename columns that have mappings
+        rename_dict = {
+            old: new for old, new in column_mapping.items() if old in df_copy.columns
+        }
+
+        if rename_dict:
+            df_copy = df_copy.rename(columns=rename_dict)
+        standardized_frames.append(df_copy)
+
+    return pd.concat(standardized_frames, ignore_index=True, sort=False)
+
+
+def _exec_Container(
+    start_node_id: str, container: Dict[str, Any], ctx: Context
+) -> pd.DataFrame:
     # Execute the loomContainer inner graph linearly from its initial node through nextNodes
-    nodes_raw = container.get('nodes') or {}
+    nodes_raw = container.get("nodes") or {}
+
     # build simple map
-    def _wrap(nid:str, obj:Dict[str,Any]) -> Node:
+    def _wrap(nid: str, obj: Dict[str, Any]) -> Node:
         return Node(
-            id=obj.get('id') or nid,
-            name=obj.get('name') or nid,
-            nodeType=obj.get('nodeType') or 'Unknown',
-            baseType=obj.get('baseType') or 'transform',
-            nextNodes=[(nn.get('nextNodeId'), nn.get('nextNamespace') or 'Default') for nn in obj.get('nextNodes',[])],
-            config=obj
+            id=obj.get("id") or nid,
+            name=obj.get("name") or nid,
+            nodeType=obj.get("nodeType") or "Unknown",
+            baseType=obj.get("baseType") or "transform",
+            nextNodes=[
+                (nn.get("nextNodeId"), nn.get("nextNamespace") or "Default")
+                for nn in obj.get("nextNodes", [])
+            ],
+            config=obj,
         )
-    inner_nodes = {nid:_wrap(nid,obj) for nid,obj in nodes_raw.items()}
+
+    inner_nodes = {nid: _wrap(nid, obj) for nid, obj in nodes_raw.items()}
     cur = inner_nodes.get(start_node_id)
     if cur is None:
         return pd.DataFrame()
     # We assume a linear chain in this container (common for Clean sequences)
     df = None
     while True:
-        if cur.nodeType == '.v2019_1_4.Remap':
+        if cur.nodeType == ".v2019_1_4.Remap":
             df = _exec_Remap(df, cur)
-        elif cur.nodeType == '.v2019_1_4.ChangeType':
+        elif cur.nodeType == ".v2019_1_4.ChangeType":
             df = _exec_ChangeType(df, cur)
-        elif cur.baseType == 'transform' and df is None:
+        elif cur.baseType == "transform" and df is None:
             # First transform in container receives from outside; we'll just carry through
             pass
         # move next
@@ -219,9 +300,15 @@ def _exec_Container(start_node_id: str, container: Dict[str, Any], ctx: Context)
             break
     return df
 
-def run_flow(flow_path: str, outdir: str = "./prep_outputs",
-             filename_map: Optional[Dict[str,str]] = None,
-             extensibility_hook: Optional[Callable[[pd.DataFrame, Dict[str,Any]], pd.DataFrame]] = None) -> Dict[str, pd.DataFrame]:
+
+def run_flow(
+    flow_path: str,
+    outdir: str = "./prep_outputs",
+    filename_map: Optional[Dict[str, str]] = None,
+    extensibility_hook: Optional[
+        Callable[[pd.DataFrame, Dict[str, Any]], pd.DataFrame]
+    ] = None,
+) -> Dict[str, pd.DataFrame]:
     fj = load_flow(flow_path)
     fl = parse(fj)
     ctx = Context(flow_path, outdir, filename_map, extensibility_hook)
@@ -233,7 +320,7 @@ def run_flow(flow_path: str, outdir: str = "./prep_outputs",
     # Helper to fetch upstream dataframes for a node (by scanning who points to it)
     rev_children = {}
     for nid, n in fl.nodes.items():
-        for (cid, _ns) in n.nextNodes:
+        for cid, _ns in n.nextNodes:
             rev_children.setdefault(cid, []).append(nid)
 
     # Simple DFS from each initial node
@@ -246,51 +333,65 @@ def run_flow(flow_path: str, outdir: str = "./prep_outputs",
         upstream = [eval_node(uid) for uid in upstream_ids]
 
         # dispatch
-        if node.nodeType == '.v2022_4_1.LoadExcel':
+        if node.nodeType == ".v2022_4_1.LoadExcel":
             out = _exec_LoadExcel(node, fl, ctx)
-        elif node.nodeType == '.v2018_2_3.SuperUnion':
+        elif node.nodeType == ".v2018_2_3.SuperUnion":
             out = _exec_SuperUnion(upstream)
-        elif node.nodeType == '.v2019_2_2.SuperExtensibilityNode':
+        elif node.nodeType == ".v2019_2_2.SuperExtensibilityNode":
             # apply annotations first if present (Remap/ChangeType listed in config['annotations'])
             df_in = upstream[0] if upstream else pd.DataFrame()
-            ann = (node.config.get('annotations') or {}).get('annotations') or []
+            ann = (node.config.get("annotations") or {}).get("annotations") or []
             # Each annotation has a node under 'annotationNode'
             for a in ann:
-                a_node = a.get('annotationNode') or {}
-                a_wrap = Node(id=a_node.get('id',''), name=a_node.get('name',''),
-                              nodeType=a_node.get('nodeType',''), baseType=a_node.get('baseType','transform'),
-                              nextNodes=[], config=a_node)
-                if a_wrap.nodeType == '.v2019_1_4.Remap':
+                a_node = a.get("annotationNode") or {}
+                a_wrap = Node(
+                    id=a_node.get("id", ""),
+                    name=a_node.get("name", ""),
+                    nodeType=a_node.get("nodeType", ""),
+                    baseType=a_node.get("baseType", "transform"),
+                    nextNodes=[],
+                    config=a_node,
+                )
+                if a_wrap.nodeType == ".v2019_1_4.Remap":
                     df_in = _exec_Remap(df_in, a_wrap)
-                elif a_wrap.nodeType == '.v2019_1_4.ChangeType':
+                elif a_wrap.nodeType == ".v2019_1_4.ChangeType":
                     df_in = _exec_ChangeType(df_in, a_wrap)
             out = _exec_SuperExtensibilityNode(df_in, node, ctx)
-        elif node.nodeType == '.v1.Container':
+        elif node.nodeType == ".v1.Container":
             # Take upstream[0] into container, run inner nodes (we handle only Remap/ChangeType pipelines)
             df_in = upstream[0] if upstream else pd.DataFrame()
-            start = ((node.config.get('loomContainer') or {}).get('initialNodes') or [None])[0]
+            start = (
+                (node.config.get("loomContainer") or {}).get("initialNodes") or [None]
+            )[0]
             # Apply container ops to df_in by temporarily setting as current df
             # Our _exec_Container currently doesn't consume df_in internally;
             # to keep behavior, we'll run each inner op against df_in iteratively.
-            inner = (node.config.get('loomContainer') or {})
-            nodes_raw = inner.get('nodes') or {}
+            inner = node.config.get("loomContainer") or {}
+            nodes_raw = inner.get("nodes") or {}
             # Build linear order from initial
             cur_id = start
             out = df_in.copy()
             while cur_id and cur_id in nodes_raw:
                 obj = nodes_raw[cur_id]
-                cur_type = obj.get('nodeType')
-                wrap = Node(id=obj.get('id',''), name=obj.get('name',''),
-                            nodeType=cur_type, baseType=obj.get('baseType','transform'),
-                            nextNodes=[(nn.get('nextNodeId'), nn.get('nextNamespace') or 'Default') for nn in obj.get('nextNodes',[])],
-                            config=obj)
-                if cur_type == '.v2019_1_4.Remap':
+                cur_type = obj.get("nodeType")
+                wrap = Node(
+                    id=obj.get("id", ""),
+                    name=obj.get("name", ""),
+                    nodeType=cur_type,
+                    baseType=obj.get("baseType", "transform"),
+                    nextNodes=[
+                        (nn.get("nextNodeId"), nn.get("nextNamespace") or "Default")
+                        for nn in obj.get("nextNodes", [])
+                    ],
+                    config=obj,
+                )
+                if cur_type == ".v2019_1_4.Remap":
                     out = _exec_Remap(out, wrap)
-                elif cur_type == '.v2019_1_4.ChangeType':
+                elif cur_type == ".v2019_1_4.ChangeType":
                     out = _exec_ChangeType(out, wrap)
                 # advance
                 cur_id = wrap.nextNodes[0][0] if wrap.nextNodes else None
-        elif node.nodeType == '.v1.WriteToHyper':
+        elif node.nodeType == ".v1.WriteToHyper":
             df_in = upstream[0] if upstream else pd.DataFrame()
             out = _exec_WriteToHyper(df_in, node, ctx)
         else:
@@ -299,7 +400,7 @@ def run_flow(flow_path: str, outdir: str = "./prep_outputs",
 
         ctx.cache[nid] = out
         # propagate to children (evaluate to ensure outputs written)
-        for (cid, _ns) in node.nextNodes:
+        for cid, _ns in node.nextNodes:
             if cid in fl.nodes:
                 eval_node(cid)
         return out
